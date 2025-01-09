@@ -1,0 +1,19 @@
+# This configuration file is used in development
+accessLog: {}
+api:
+  insecure: true
+entryPoints:
+  web:
+    address: ":80"
+  websecure:
+    address: ":443"
+providers:
+  docker:
+    exposedByDefault: false
+  file:
+    filename: "/traefik.yaml"
+    watch: true
+tls:
+  certificates:
+    - certFile: /certs/dev.pem
+      keyFile: /certs/dev.key

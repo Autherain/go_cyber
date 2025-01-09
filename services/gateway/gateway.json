@@ -1,0 +1,6 @@
+{
+  "deleteMethod": "delete",
+  "patchMethod": "patch",
+  "putMethod": "put",
+  "requestTimeout": 60000
+}

@@ -1,0 +1,77 @@
+services:
+  nats:
+    container_name: nats
+    image: nats:2.10-alpine
+    command:
+      - "-DVV"
+      - "--config"
+      - "/etc/nats-config/nats.conf"
+    ports:
+      - 4222:4222
+      - 8222:8222 # HTTP Server pour le monitoring
+    volumes:
+      - ./services/nats/nats.conf:/etc/nats-config/nats.conf:ro
+      - ./var/data/jetstream/:/data/jetstream/
+      - /var/run/nats/
+
+  gateway:
+    image: resgateio/resgate
+    platform: linux/amd64
+    command:
+      - --config=/etc/config.json
+      - --debug
+      - --nats=nats://nats:4222
+      - --DV
+    ports:
+      - 8880:8080
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.gateway.entrypoints=websecure"
+      - "traefik.http.routers.gateway.rule=Host(`svc.localhost`)"
+      - "traefik.http.routers.gateway.tls=true"
+      - "traefik.http.services.gateway.loadbalancer.server.port=8080"
+      - "traefik.http.middlewares.gateway.headers.accessControlExposeHeaders=Location"
+      - "traefik.http.routers.gateway.middlewares=gateway"
+      - "traefik.http.middlewares.gateway.headers.accesscontrolallowmethods=GET,OPTIONS,PUT"
+      - "traefik.http.middlewares.gateway.headers.accesscontrolallowheaders=*"
+    volumes:
+      - ./services/gateway/gateway.json:/etc/config.json:ro
+    depends_on:
+      - nats
+      - traefik
+
+  traefik:
+    image: traefik:3.1
+    ports:
+      - 80:80
+      - 443:443
+      - 8888:8080
+    volumes:
+      - "./services/traefik/certs/:/certs/"
+      - "./services/traefik/traefik.yaml:/traefik.yaml:ro"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+
+  api.server:
+    build:
+      context: ./services/api
+      dockerfile: build/server/dockerfile
+    environment:
+      APP_NATS_URL: nats://nats:4222
+      APP_SERVICE_NAME: api.server
+      APP_SERVICE_IN_CHANNEL_SIZE: 1024
+      APP_SERVICE_WORKER_COUNT: 128
+      APP_SHUTDOWN_TIMEOUT: 30s
+      APP_HEALTH_ENABLED: true
+      APP_LOG_FORMAT: json
+      APP_LOG_LEVEL: debug
+      APP_LOG_SOURCE: true
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.entrypoints=websecure"
+      - "traefik.http.routers.api.rule=Host(`api.localhost`)"
+      - "traefik.http.routers.api.tls=true"
+      - "traefik.http.services.api.loadbalancer.server.port=3000"
+    depends_on:
+      - nats
+      - gateway
+      - traefik
