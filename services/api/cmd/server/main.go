@@ -7,64 +7,54 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/Autherain/go_cyber/server"
-
 	"github.com/Autherain/go_cyber/environment"
 	"github.com/Autherain/go_cyber/internal/health"
 	"github.com/Autherain/go_cyber/internal/logger"
+	"github.com/Autherain/go_cyber/server"
+	"github.com/jirenius/go-res"
 )
 
-const (
-	ServiceName = "api"
-)
+const serviceName = "api"
 
 func main() {
 	// Parse environment variables
 	variables := environment.Parse()
 
 	// Initialize logger
-	logger := logger.NewLogger(logger.Config{
+	log := logger.NewLogger(logger.Config{
 		Format:    variables.LogFormat,
 		Level:     variables.LogLevel,
 		AddSource: variables.LogSource,
 	})
-	slog.SetDefault(logger.SlogLogger())
+	slog.SetDefault(log.SlogLogger())
 
 	// Initialize NATS connection
 	natsConn := environment.MustInitNATSConn(variables)
 	defer natsConn.Close()
 
-	// Initialize version info for health checker
-	versionInfo := health.NewVersionInfo(
-		variables.Env,
-	)
+	// Initialize service first
+	service := res.NewService(serviceName)
+	service.SetLogger(log)
+	service.SetInChannelSize(variables.ServiceInChannelSize)
+	service.SetWorkerCount(variables.ServiceWorkerCount)
 
 	// Initialize health checker
 	healthChecker := health.New(
 		natsConn,
-		versionInfo,
+		health.NewVersionInfo(variables.Env),
 		health.WithNATSCheck(natsConn),
 		health.WithInterval(variables.HealthCheckInterval),
 		health.WithTimeout(variables.HealthCheckTimeout),
 		health.WithSubject(variables.HealthCheckSubject),
-		health.WithServiceName(variables.ServiceName),
+		health.WithServiceName(serviceName),
 	)
 
-	// Create server configuration
-	config := &server.Config{
-		ServiceName:          ServiceName,
-		ServiceInChannelSize: variables.ServiceInChannelSize,
-		ServiceWorkerCount:   variables.ServiceWorkerCount,
-		ShutdownTimeout:      variables.ShutdownTimeout,
-		HealthCheckEnabled:   variables.HealthCheckEnabled,
-	}
-
-	// Create and configure server
+	// Create server with all dependencies
 	srv := server.New(
-		config,
-		server.WithLogger(logger),
-		server.WithNATSConnection(natsConn),
+		server.WithService(service),
+		server.WithLogger(log),
 		server.WithHealthChecker(healthChecker),
+		server.WithShutdownTimeout(variables.ShutdownTimeout),
 	)
 
 	// Setup context with cancellation
@@ -76,13 +66,13 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigChan
-		logger.Info("Received shutdown signal", "signal", sig)
+		log.Info("Received shutdown signal", "signal", sig)
 		cancel()
 	}()
 
 	// Start server
-	if err := srv.Start(ctx); err != nil {
-		logger.Error("Server error", "error", err)
+	if err := srv.Start(ctx, natsConn); err != nil {
+		log.Error("Server error", "error", err)
 		os.Exit(1)
 	}
 }

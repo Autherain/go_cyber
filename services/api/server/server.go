@@ -12,100 +12,96 @@ import (
 )
 
 type Server struct {
-	service       *res.Service
-	natsConn      *nats.Conn
-	log           *logger.Logger
-	wg            sync.WaitGroup
-	config        *Config
-	healthChecker *health.HealthChecker
-}
-
-type Config struct {
-	ServiceName          string
-	ServiceInChannelSize int
-	ServiceWorkerCount   int
-	ShutdownTimeout      time.Duration
-	HealthCheckEnabled   bool
-}
-
-func New(config *Config, options ...Option) *Server {
-	server := &Server{
-		config: config,
-	}
-
-	// Apply options before creating the service
-	for _, option := range options {
-		option(server)
-	}
-
-	// Ensure there's a default logger if none was set
-	if server.log == nil {
-		server.log = logger.NewDefault()
-	}
-
-	// Create service with the configured logger
-	server.service = res.NewService(config.ServiceName).
-		SetInChannelSize(config.ServiceInChannelSize).
-		SetLogger(server.log).
-		SetWorkerCount(config.ServiceWorkerCount)
-
-	return server
+	service         *res.Service
+	log             *logger.Logger
+	healthChecker   *health.HealthChecker
+	wg              sync.WaitGroup
+	shutdownTimeout time.Duration
 }
 
 type Option func(*Server)
 
+// New creates a new server instance with the given options
+func New(options ...Option) *Server {
+	s := &Server{}
+
+	for _, option := range options {
+		option(s)
+	}
+
+	if s.service == nil {
+		panic("server requires a RES service")
+	}
+
+	s.addResourceHandlers()
+
+	if s.log == nil {
+		s.log = logger.NewDefault()
+	}
+
+	return s
+}
+
+// WithService sets the RES service
+func WithService(service *res.Service) Option {
+	return func(s *Server) {
+		s.service = service
+	}
+}
+
+// WithLogger sets the logger
 func WithLogger(logger *logger.Logger) Option {
 	return func(s *Server) {
 		s.log = logger
 	}
 }
 
-func WithNATSConnection(conn *nats.Conn) Option {
-	return func(s *Server) {
-		s.natsConn = conn
-	}
-}
-
+// WithHealthChecker sets the health checker
 func WithHealthChecker(healthChecker *health.HealthChecker) Option {
 	return func(s *Server) {
 		s.healthChecker = healthChecker
 	}
 }
 
-func (s *Server) Start(ctx context.Context) error {
-	s.log.Info("Starting application",
-		"version", s.healthChecker.GetHealth().Version,
-		"environment", s.healthChecker.GetHealth().Environment,
-	)
+// WithShutdownTimeout sets the shutdown timeout
+func WithShutdownTimeout(timeout time.Duration) Option {
+	return func(s *Server) {
+		s.shutdownTimeout = timeout
+	}
+}
+
+func (s *Server) Start(ctx context.Context, natsConn *nats.Conn) error {
+	s.log.Info("Starting application")
 
 	errChan := make(chan error, 1)
 
-	// Start health checker only if enabled
-	if s.config.HealthCheckEnabled {
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			if err := s.healthChecker.Start(); err != nil {
-				s.log.Error("Health checker error", "error", err)
-				errChan <- err
-			}
-		}()
+	// Start health checker if enabled
+	if s.healthChecker != nil {
+		s.startHealthChecker(errChan)
 	}
 
 	// Start service
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		if err := s.service.Serve(s.natsConn); err != nil {
+		if err := s.service.Serve(natsConn); err != nil {
 			s.log.Error("Service error", "error", err)
 			errChan <- err
 		}
 	}()
 
-	// Define resources
-	s.defineResources()
-
 	return s.handleShutdown(ctx, errChan)
+}
+
+func (s *Server) startHealthChecker(errChan chan error) {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		if err := s.healthChecker.Start(); err != nil {
+			s.log.Error("Health checker error", "error", err)
+			errChan <- err
+		}
+	}()
 }
 
 func (s *Server) handleShutdown(ctx context.Context, errChan chan error) error {
@@ -119,14 +115,15 @@ func (s *Server) handleShutdown(ctx context.Context, errChan chan error) error {
 }
 
 func (s *Server) shutdown() error {
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.config.ShutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 	defer cancel()
 
-	// Stop health checker
-	s.healthChecker.Stop()
+	if s.healthChecker != nil {
+		s.healthChecker.Stop()
+	}
 
-	if err := s.natsConn.Drain(); err != nil {
-		s.log.Error("Error draining NATS connection", "error", err)
+	if err := s.service.Shutdown(); err != nil {
+		s.log.Error("Error stopping RES service", "error", err)
 	}
 
 	done := make(chan struct{})
@@ -145,15 +142,19 @@ func (s *Server) shutdown() error {
 	}
 }
 
-func (s *Server) defineResources() {
+func (s *Server) addResourceHandlers() {
+	// Add your resource handlers here
 	s.service.Handle(
-		"myresource.>",
-		res.Access(res.AccessGranted),
-		res.GetResource(func(r res.GetRequest) {
-			r.Model(map[string]interface{}{
-				"message": "Hello from RES!",
-				"time":    time.Now().Format(time.RFC3339),
-			})
-		}),
+		"api.>",
+		s.handleAPIRequest(),
 	)
+}
+
+func (s *Server) handleAPIRequest() res.Option {
+	return res.GetModel(func(r res.ModelRequest) {
+		r.Model(map[string]interface{}{
+			"message": "Hello from API",
+			"time":    time.Now().Format(time.RFC3339),
+		})
+	})
 }
